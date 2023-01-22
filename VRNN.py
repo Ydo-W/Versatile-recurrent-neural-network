@@ -86,7 +86,6 @@ class RDNet(nn.Module):
         return out
 
 
-# 通道注意力，也即时间注意力
 class ChannelAttention(nn.Module):
     def __init__(self, in_planes, ratio=16):
         super(ChannelAttention, self).__init__()
@@ -105,7 +104,7 @@ class ChannelAttention(nn.Module):
         out = avg_out + max_out
         return self.sigmoid(out)
 
-# 空间注意力
+
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention, self).__init__()
@@ -124,7 +123,6 @@ class SpatialAttention(nn.Module):
         return self.sigmoid(x)
 
 
-# 融合模块，基于时间和空间注意力
 class fusion_new(nn.Module):
     def __init__(self, ff=2, fb=2, n_feats = 16):
         super(fusion_new, self).__init__()
@@ -135,22 +133,21 @@ class fusion_new(nn.Module):
         self.conv2 = conv1x1((5*n_feats)*(ff*2+1), (5*n_feats)*(ff*2+1))
 
     def forward(self, fm):
-        self.nframes = len(fm)  # 融合的序列长度，设置为5
-        f_ref = fm[self.center]  # hs[2]，参考帧
+        self.nframes = len(fm)
+        f_ref = fm[self.center]
         out = []
-        for i in range(self.nframes):  # i = 0, 1, 2, 3, 4
+        for i in range(self.nframes):
             if i != self.center:
                 map_cated = torch.cat([f_ref, fm[i]], dim = 1)
-                map_cated = self.time_attention(map_cated) * map_cated  # 经过时间注意加权
-                map_cated = self.space_attention(map_cated) * map_cated  # 经过空间注意加权
+                map_cated = self.time_attention(map_cated) * map_cated
+                map_cated = self.space_attention(map_cated) * map_cated
                 map_cated = self.conv1(map_cated)
                 out.append(map_cated)
         out.append(f_ref)
-        out = self.conv2(torch.cat(out, dim=1))  # (bs, 400, 64, 64)
+        out = self.conv2(torch.cat(out, dim=1))
         return out
 
 
-# 重建模块，上接融合模块的输出
 class Reconstructor(nn.Module):
     def __init__(self, ff=2, fb=2, n_feats = 16):
         super(Reconstructor, self).__init__()
@@ -171,7 +168,7 @@ class Reconstructor(nn.Module):
         return self.model(x)
 
 
-# RNN单元
+# RNN cell
 class RNNcell(nn.Module):
     def __init__(self, n_blocks=9, n_feats=16):
         super(RNNcell, self).__init__()
@@ -188,7 +185,6 @@ class RNNcell(nn.Module):
         )
         self.F_R = RDNet(in_channels=(1 + 4) * self.n_feats, growthRate=2 * self.n_feats, num_layer=3,
                          num_blocks=self.n_blocks)  # in: 80
-        # F_h: hidden state part
         self.F_h = nn.Sequential(
             conv3x3((1 + 4) * self.n_feats, self.n_feats),
             RDB(in_channels=self.n_feats, growthRate=self.n_feats, num_layer=3),
@@ -205,7 +201,7 @@ class RNNcell(nn.Module):
         return out, s
 
 
-# VRNN网络
+# VRNN
 class Model(nn.Module):
     def __init__(self, ff=2, fb=2, n_blocks=9, n_feats = 16):
         super(Model, self).__init__()
@@ -214,38 +210,33 @@ class Model(nn.Module):
         self.num_fb = fb
         self.ds_ratio = 4
         self.device = torch.device('cuda')
-        self.cell = RNNcell(n_blocks)  # 正序RNNcell
-        self.cell1 = RNNcell(n_blocks)  # 逆序RNNcell
+        self.cell = RNNcell(n_blocks)  # Forward RNN
+        self.cell1 = RNNcell(n_blocks)  # Backward RNN
         self.recons = Reconstructor(ff, fb, n_feats)
         self.fusion = fusion_new(ff, fb, n_feats)
         self.y_Merge = conv1x1(10 * self.n_feats, 5 * self.n_feats)
 
     def forward(self, x):
-        x = prepare(False, True, x)  # 图像中心化，并没有归一化
+        x = prepare(False, True, x)
         outputs, hs0, hs1, hs = [], [], [], []
         batch_size, frames, channels, height, width = x.shape
-        s_height = int(height / self.ds_ratio)  # h / 4 : 64
-        s_width = int(width / self.ds_ratio)  # w / 4 : 64
-        # forward h structure: (batch_size, channel, height, width)
+        s_height = int(height / self.ds_ratio)
+        s_width = int(width / self.ds_ratio)
         s = torch.zeros(batch_size, self.n_feats, s_height, s_width).to(self.device)  # s : batch_size, 16, 64, 64
-        # RNN正序传递
-        for i in range(frames):  # i = 0~11
+        for i in range(frames):
             h, s = self.cell(x[:, i, :, :, :], s)
             hs0.append(h)
-        # RNN逆序传递
-        # 考虑是否使用正序最后的s，若是则此句注释掉
         s = torch.zeros(batch_size, self.n_feats, s_height, s_width).to(self.device)
-        for i in range(frames - 1, -1, -1):  # i = 0~11
+        for i in range(frames - 1, -1, -1):
             h, s = self.cell1(x[:, i, :, :, :], s)
             hs1.append(h)
-        # 正逆序融合
-        for i in range(frames):  # i = 0~11
+        for i in range(frames):
             s = torch.cat([hs1[frames - 1 - i], hs0[i]], dim=1)
             s = self.y_Merge(s)
             hs.append(s)
-        for i in range(self.num_fb, frames - self.num_ff):  # i = 2~9
-            out = self.fusion(hs[i - self.num_fb:i + self.num_ff + 1])  # -2, -1, 0, 1, 2
-            out = self.recons(out)  # (bs, 400, 64, 64) -> (bs, 3, 256, 256)
+        for i in range(self.num_fb, frames - self.num_ff):
+            out = self.fusion(hs[i - self.num_fb:i + self.num_ff + 1])
+            out = self.recons(out)
             out = out + x[:, i, :, :, :]
             outputs.append(out.unsqueeze(dim=1))
         return prepare_reverse(False, True, torch.cat(outputs, dim=1))

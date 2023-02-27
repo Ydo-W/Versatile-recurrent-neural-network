@@ -31,3 +31,17 @@ quantitative evaluations.
 * Run ```python train.py``` to perform training 
 with the default setting on the training data in 
 ```../data/small_dataset/train/```.
+
+Please cite our paper in your publications if our work helps your research.
+
+```
+@article{wang2023versatile,
+  title={Versatile recurrent neural network for wide types of video restoration},
+  author={Wang, Yadong and Bai, Xiangzhi},
+  journal={Pattern Recognition},
+  volume={138},
+  pages={109360},
+  year={2023},
+  publisher={Elsevier}
+}
+```
